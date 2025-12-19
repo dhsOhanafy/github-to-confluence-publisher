@@ -45,9 +45,11 @@ def createPage(title, content, parentPageID, login, password):
     # the key of Confluence space for content publishing
     newPagejsonQuery['space']['key'] = CONFIG["confluence_space"]
 
-    # check of input of the ParentPageID 
-    if parentPageID is None: 
-        newPagejsonQuery['ancestors'][0]['id']  = CONFIG["counfluence_parent_page_id"] # this is the root of out pages tree
+    # check of input of the ParentPageID
+    if parentPageID is None:
+        # Support both typo and correct spelling for backwards compatibility
+        parent_id = CONFIG.get("confluence_parent_page_id") or CONFIG.get("counfluence_parent_page_id")
+        newPagejsonQuery['ancestors'][0]['id']  = parent_id # this is the root of out pages tree
     else:
         newPagejsonQuery['ancestors'][0]['id'] = str(parentPageID) # this is the branch of our tree
 
@@ -73,13 +75,38 @@ def createPage(title, content, parentPageID, login, password):
     verify=False)
 
     logging.debug(response.status_code)
-    if response.status_code == 200:
-        logging.info("Created successfully")
-    logging.debug(json.dumps(json.loads(response.text), indent=4, sort_keys=True))
 
-    # return new page id
-    logging.debug("Returning created page id: " + json.loads(response.text)['id'])
-    return json.loads(response.text)['id']
+    # Parse response
+    try:
+        response_json = json.loads(response.text)
+        logging.debug(json.dumps(response_json, indent=4, sort_keys=True))
+    except json.JSONDecodeError:
+        logging.error("Failed to parse response JSON")
+        return {
+            'success': False,
+            'error': f'Invalid JSON response from Confluence (status {response.status_code})',
+            'response_text': response.text[:500]  # First 500 chars for debugging
+        }
+
+    # Check if page was created successfully
+    if response.status_code == 200 and 'id' in response_json:
+        logging.info("Created successfully")
+        page_id = response_json['id']
+        logging.debug("Returning created page id: " + page_id)
+        return {
+            'success': True,
+            'page_id': page_id
+        }
+    else:
+        # Page creation failed
+        error_message = response_json.get('message', 'Unknown error')
+        logging.error(f"Page creation failed: {error_message}")
+        return {
+            'success': False,
+            'error': error_message,
+            'status_code': response.status_code,
+            'response': response_json
+        }
 
 
 #   
@@ -90,10 +117,13 @@ def searchPages(login, password):
     # GET /rest/api/search?cql=text~%7B%22SEARCH%20PATTERN%22%7D+and+type=page+and+space=%2212345%22&limit=1000 HTTP/1.1" 200
     # "cqlQuery": "parent=301176119 and text~{\"SEARCH PATTERN\"} and type=page and space=\"12345\""
 
-    logging.debug("Calling URL: " + str(CONFIG["confluence_url"]) + "search?cql=parent=" + str(CONFIG["counfluence_parent_page_id"]) + 
-            "+and+text~{\"" + str(CONFIG["confluence_search_pattern"]) + 
-            "\"}+and+type=page+and+space=\"" + 
-            str(CONFIG["confluence_space"]) + 
+    # Support both typo and correct spelling for backwards compatibility
+    parent_id = CONFIG.get("confluence_parent_page_id") or CONFIG.get("counfluence_parent_page_id")
+
+    logging.debug("Calling URL: " + str(CONFIG["confluence_url"]) + "search?cql=parent=" + str(parent_id) +
+            "+and+text~{\"" + str(CONFIG["confluence_search_pattern"]) +
+            "\"}+and+type=page+and+space=\"" +
+            str(CONFIG["confluence_space"]) +
             "\"&limit=1000")
 
 
@@ -117,8 +147,8 @@ def searchPages(login, password):
         foundPages.append(result['content']['id']) # add found page id
         logging.info("Found page: " + result['content']['id'] + " with title: " +  result['content']['title'])
 
-    logging.debug("Found pages in space " + str(CONFIG["confluence_space"]) + " and parent page: " + 
-        str(CONFIG["counfluence_parent_page_id"])+ " and search text: " + 
+    logging.debug("Found pages in space " + str(CONFIG["confluence_space"]) + " and parent page: " +
+        str(parent_id)+ " and search text: " +
         str(CONFIG["confluence_search_pattern"])  +": " + str(foundPages))
 
     return foundPages

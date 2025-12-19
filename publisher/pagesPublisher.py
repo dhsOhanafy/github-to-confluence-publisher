@@ -9,20 +9,40 @@ from pagesController import attachFile
 
 CONFIG = getConfig()
 
+# Global error collection
+publish_errors = []
+success_count = 0
+
 def publishFolder(folder, login, password, parentPageID = None): # parentPageID has the default input parameter "None" (it means ROOT)
+    global publish_errors, success_count
     logging.info("Publishing folder: " + folder)
     for entry in os.scandir(folder):
         if entry.is_dir():
             # create page with the DISPLAY CHILDREN macro for the directories in the folder with MD files
             logging.info("Found directory: " + str(entry.path))
-            currentPageID = createPage(title=str(entry.name), 
+            result = createPage(title=str(entry.name),
                 content="<ac:structured-macro ac:name=\"children\" ac:schema-version=\"2\" ac:macro-id=\"80b8c33e-cc87-4987-8f88-dd36ee991b15\"/>", # name of the DISPLAY CHILDREN macro
-                parentPageID = parentPageID, 
-                login=login, 
+                parentPageID = parentPageID,
+                login=login,
                 password=password)
 
-            # publish files in the current folder
-            publishFolder(folder=entry.path, login=login, password=password, parentPageID=currentPageID)
+            # Check if page creation was successful
+            if result['success']:
+                success_count += 1
+                currentPageID = result['page_id']
+                # publish files in the current folder
+                publishFolder(folder=entry.path, login=login, password=password, parentPageID=currentPageID)
+            else:
+                # Log error and continue processing
+                error_info = {
+                    'path': str(entry.path),
+                    'type': 'directory',
+                    'error': result.get('error', 'Unknown error'),
+                    'status_code': result.get('status_code', 'N/A')
+                }
+                publish_errors.append(error_info)
+                logging.warning(f"Skipping directory {entry.path} and its children due to error")
+                # Don't recurse into this directory since we couldn't create the parent page
             
         elif entry.is_file():
             logging.info("Found file: " + str(entry.path))
@@ -51,26 +71,41 @@ def publishFolder(folder, login, password, parentPageID = None): # parentPageID 
                         else:  # line without an image
                             newFileContent += line
                         
-                    # create new page 
-                    pageIDforFileAttaching = createPage(title=str(entry.name), 
-                        content=markdown.markdown(newFileContent, extensions=['markdown.extensions.tables', 'fenced_code']), 
-                        parentPageID = parentPageID, 
-                        login=login, 
+                    # create new page
+                    result = createPage(title=str(entry.name),
+                        content=markdown.markdown(newFileContent, extensions=['markdown.extensions.tables', 'fenced_code']),
+                        parentPageID = parentPageID,
+                        login=login,
                         password=password)
 
-                    # if do exist files to Upload as attachments
-                    if bool(filesToUpload): 
-                        for file in filesToUpload:                  
-                            imagePath = str(CONFIG["github_folder_with_image_files"]) + "/" + file #full path of uploaded image file
-                            if os.path.isfile(imagePath): # check if the  file exist
-                                logging.info("Attaching file: " + imagePath + "  to the page: " + str(pageIDforFileAttaching))
-                                with open(imagePath, 'rb') as attachedFile:
-                                    attachFile(pageIdForFileAttaching=pageIDforFileAttaching,
-                                        attachedFile=attachedFile,
-                                        login=login, 
-                                        password=password)
-                            else:
-                                logging.error("File: " + str(imagePath) + "  not found. Nothing to attach")
+                    # Check if page creation was successful
+                    if result['success']:
+                        success_count += 1
+                        pageIDforFileAttaching = result['page_id']
+
+                        # if do exist files to Upload as attachments
+                        if bool(filesToUpload):
+                            for file in filesToUpload:
+                                imagePath = str(CONFIG["github_folder_with_image_files"]) + "/" + file #full path of uploaded image file
+                                if os.path.isfile(imagePath): # check if the  file exist
+                                    logging.info("Attaching file: " + imagePath + "  to the page: " + str(pageIDforFileAttaching))
+                                    with open(imagePath, 'rb') as attachedFile:
+                                        attachFile(pageIdForFileAttaching=pageIDforFileAttaching,
+                                            attachedFile=attachedFile,
+                                            login=login,
+                                            password=password)
+                                else:
+                                    logging.error("File: " + str(imagePath) + "  not found. Nothing to attach")
+                    else:
+                        # Log error and continue processing
+                        error_info = {
+                            'path': str(entry.path),
+                            'type': 'file',
+                            'error': result.get('error', 'Unknown error'),
+                            'status_code': result.get('status_code', 'N/A')
+                        }
+                        publish_errors.append(error_info)
+                        logging.warning(f"Skipping file {entry.path} due to error")
             else:
                 logging.info("File: " + str(entry.path) + "  is not a MD file. Publishing has rejected")
 
