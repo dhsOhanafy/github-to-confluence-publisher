@@ -121,16 +121,16 @@ def searchPages(login, password):
     parent_id = CONFIG.get("confluence_parent_page_id") or CONFIG.get("counfluence_parent_page_id")
 
     logging.debug("Calling URL: " + str(CONFIG["confluence_url"]) + "search?cql=parent=" + str(parent_id) +
-            "+and+text~{\"" + str(CONFIG["confluence_search_pattern"]) +
+            "+and+title~{\"" + str(CONFIG["confluence_search_pattern"]) +
             "\"}+and+type=page+and+space=\"" +
             str(CONFIG["confluence_space"]) +
             "\"&limit=1000")
 
 
     response = requests.get(
-        url=str(CONFIG["confluence_url"]) + "search?cql=text~{\"" + str(CONFIG["confluence_search_pattern"]) + 
-            "\"}+and+type=page+and+space=\"" + 
-            str(CONFIG["confluence_space"]) + 
+        url=str(CONFIG["confluence_url"]) + "search?cql=title~{\"" + str(CONFIG["confluence_search_pattern"]) +
+            "\"}+and+type=page+and+space=\"" +
+            str(CONFIG["confluence_space"]) +
             "\"&limit=1000", 
         auth=HTTPBasicAuth(login, password),
         verify=False)
