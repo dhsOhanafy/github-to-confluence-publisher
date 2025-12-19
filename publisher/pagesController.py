@@ -120,8 +120,7 @@ def searchPages(login, password):
     # Support both typo and correct spelling for backwards compatibility
     parent_id = CONFIG.get("confluence_parent_page_id") or CONFIG.get("counfluence_parent_page_id")
 
-    logging.debug("Calling URL: " + str(CONFIG["confluence_url"]) + "search?cql=parent=" + str(parent_id) +
-            "+and+title~{\"" + str(CONFIG["confluence_search_pattern"]) +
+    logging.debug("Calling URL: " + str(CONFIG["confluence_url"]) + "search?cql=title~{\"" + str(CONFIG["confluence_search_pattern"]) +
             "\"}+and+type=page+and+space=\"" +
             str(CONFIG["confluence_space"]) +
             "\"&limit=1000")
@@ -147,8 +146,7 @@ def searchPages(login, password):
         foundPages.append(result['content']['id']) # add found page id
         logging.info("Found page: " + result['content']['id'] + " with title: " +  result['content']['title'])
 
-    logging.debug("Found pages in space " + str(CONFIG["confluence_space"]) + " and parent page: " +
-        str(parent_id)+ " and search text: " +
+    logging.debug("Found pages in space " + str(CONFIG["confluence_space"]) + " with search pattern in title: " +
         str(CONFIG["confluence_search_pattern"])  +": " + str(foundPages))
 
     return foundPages
