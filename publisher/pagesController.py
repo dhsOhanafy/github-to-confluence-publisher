@@ -1,6 +1,7 @@
 import json
 import logging
 import requests
+from urllib.parse import quote
 from urllib3.exceptions import InsecureRequestWarning
 from requests.auth import HTTPBasicAuth
 from config.getconfig import getConfig
@@ -30,13 +31,17 @@ def findPageByTitle(title, parentPageID, login, password):
     # Build search query - exact title match with parent constraint
     # CQL: title="exact title" AND parent={id} AND space="key"
     search_title = title + "  " + str(CONFIG["confluence_search_pattern"])
-    cql_query = f'title="{search_title}" AND ancestor={parent_id_to_use} AND space="{CONFIG["confluence_space"]}"'
+    cql_query = f'title="{search_title}" AND parent={parent_id_to_use} AND space="{CONFIG["confluence_space"]}"'
+
+    # URL-encode the CQL query to handle special characters
+    encoded_cql = quote(cql_query)
 
     logging.debug(f"Searching for existing page: {cql_query}")
+    logging.debug(f"Encoded CQL: {encoded_cql}")
 
     try:
         response = requests.get(
-            url=f'{CONFIG["confluence_url"]}search?cql={cql_query}&limit=5&expand=version',
+            url=f'{CONFIG["confluence_url"]}search?cql={encoded_cql}&limit=5&expand=version',
             auth=HTTPBasicAuth(login, password),
             verify=False
         )
