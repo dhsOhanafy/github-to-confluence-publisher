@@ -4,7 +4,7 @@ import sys
 
 from config.getconfig import getConfig
 from pagesController import deletePages, searchPages
-from pagesPublisher import publishFolder, publish_errors, success_count
+from pagesPublisher import publishFolder, publish_errors, success_count, created_count, updated_count
 
 logging.basicConfig(level=logging.INFO)
 
@@ -32,8 +32,16 @@ publishFolder(folder = str(CONFIG["github_folder_with_md_files"]),
 print("\n" + "="*80)
 print("CONFLUENCE PUBLISHING SUMMARY")
 print("="*80)
-print(f"\n✅ SUCCESSFUL: {success_count} pages created/updated")
+print(f"\n✅ SUCCESSFUL: {success_count} pages published")
+print(f"   📝 Created: {created_count} new pages")
+print(f"   🔄 Updated: {updated_count} existing pages")
 print(f"❌ FAILED: {len(publish_errors)} pages")
+
+# Calculate success rate
+total_attempted = success_count + len(publish_errors)
+if total_attempted > 0:
+    success_rate = (success_count / total_attempted) * 100
+    print(f"\n📊 Success Rate: {success_rate:.1f}%")
 
 if publish_errors:
     print("\nERRORS:")

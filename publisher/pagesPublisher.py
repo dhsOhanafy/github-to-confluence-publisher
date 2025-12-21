@@ -9,12 +9,14 @@ from pagesController import attachFile
 
 CONFIG = getConfig()
 
-# Global error collection
+# Global tracking collections
 publish_errors = []
 success_count = 0
+created_count = 0
+updated_count = 0
 
 def publishFolder(folder, login, password, parentPageID = None): # parentPageID has the default input parameter "None" (it means ROOT)
-    global publish_errors, success_count
+    global publish_errors, success_count, created_count, updated_count
     logging.info("Publishing folder: " + folder)
     for entry in os.scandir(folder):
         if entry.is_dir():
@@ -29,6 +31,10 @@ def publishFolder(folder, login, password, parentPageID = None): # parentPageID 
             # Check if page creation was successful
             if result['success']:
                 success_count += 1
+                if result.get('operation') == 'created':
+                    created_count += 1
+                elif result.get('operation') == 'updated':
+                    updated_count += 1
                 currentPageID = result['page_id']
                 # publish files in the current folder
                 publishFolder(folder=entry.path, login=login, password=password, parentPageID=currentPageID)
@@ -81,6 +87,10 @@ def publishFolder(folder, login, password, parentPageID = None): # parentPageID 
                     # Check if page creation was successful
                     if result['success']:
                         success_count += 1
+                        if result.get('operation') == 'created':
+                            created_count += 1
+                        elif result.get('operation') == 'updated':
+                            updated_count += 1
                         pageIDforFileAttaching = result['page_id']
 
                         # if do exist files to Upload as attachments
