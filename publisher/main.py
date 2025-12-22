@@ -4,7 +4,7 @@ import sys
 
 from config.getconfig import getConfig
 from pagesController import cleanupOrphanPages
-from pagesPublisher import publishFolder, buildExpectedPagesSet, publish_errors, success_count, created_count, updated_count
+from pagesPublisher import publishFolder, buildExpectedPagesSet, _stats
 
 logging.basicConfig(level=logging.INFO)
 
@@ -40,7 +40,7 @@ logging.info("\n" + "=" * 80)
 logging.info("PHASE 3: Differential cleanup (orphan pages)")
 logging.info("=" * 80)
 
-if len(publish_errors) == 0:
+if len(_stats.errors) == 0:
     cleanup_result = cleanupOrphanPages(
         expected_pages_set=expected_pages,
         login=inputArguments['login'],
@@ -59,21 +59,21 @@ else:
 print("\n" + "="*80)
 print("CONFLUENCE PUBLISHING SUMMARY")
 print("="*80)
-print(f"\n✅ SUCCESSFUL: {success_count} pages published")
-print(f"   📝 Created: {created_count} new pages")
-print(f"   🔄 Updated: {updated_count} existing pages")
-print(f"❌ FAILED: {len(publish_errors)} pages")
+print(f"\n✅ SUCCESSFUL: {_stats.success_count} pages published")
+print(f"   📝 Created: {_stats.created_count} new pages")
+print(f"   🔄 Updated: {_stats.updated_count} existing pages")
+print(f"❌ FAILED: {len(_stats.errors)} pages")
 
 # Calculate success rate
-total_attempted = success_count + len(publish_errors)
+total_attempted = _stats.success_count + len(_stats.errors)
 if total_attempted > 0:
-    success_rate = (success_count / total_attempted) * 100
+    success_rate = (_stats.success_count / total_attempted) * 100
     print(f"\n📊 Success Rate: {success_rate:.1f}%")
 
-if publish_errors:
+if _stats.errors:
     print("\nERRORS:")
     print("-" * 80)
-    for idx, error in enumerate(publish_errors, 1):
+    for idx, error in enumerate(_stats.errors, 1):
         print(f"\n{idx}. {error['path']}")
         print(f"   Type: {error['type']}")
         print(f"   Error: {error['error']}")

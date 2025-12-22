@@ -2,6 +2,8 @@ import logging
 import os
 import markdown
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from config.getconfig import getConfig
 from pagesController import createPage
 from pagesController import attachFile
@@ -9,8 +11,35 @@ from pagesController import attachFile
 
 CONFIG = getConfig()
 
-# Global tracking collections
-publish_errors = []
+
+class PublishStats:
+    """Thread-safe statistics tracking for parallel publishing."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.errors = []
+        self.success_count = 0
+        self.created_count = 0
+        self.updated_count = 0
+
+    def add_success(self, operation=None):
+        with self.lock:
+            self.success_count += 1
+            if operation == 'created':
+                self.created_count += 1
+            elif operation == 'updated':
+                self.updated_count += 1
+
+    def add_error(self, error_info):
+        with self.lock:
+            self.errors.append(error_info)
+
+
+# Create global instance
+_stats = PublishStats()
+
+# Legacy global variables for backward compatibility
+publish_errors = _stats.errors
 success_count = 0
 created_count = 0
 updated_count = 0
@@ -64,9 +93,86 @@ def buildExpectedPagesSet(folder):
     logging.info(f"Built expected pages set: {len(expected_pages)} pages")
     return expected_pages
 
-def publishFolder(folder, login, password, parentPageID = None, base_folder = None):
+
+def processMarkdownFile(file_entry, parentPageID, login, password, base_folder):
     """
-    Recursively publish folders and files to Confluence.
+    Process a single markdown file and create Confluence page.
+
+    This function is extracted to enable parallel file processing.
+    Thread-safe: No shared state between files.
+    """
+    rel_path = os.path.relpath(file_entry.path, base_folder)
+    rel_path = rel_path.replace(os.sep, '/')
+
+    logging.info("Processing file: " + str(file_entry.path))
+
+    newFileContent = ""
+    filesToUpload = []
+
+    with open(file_entry.path, 'r', encoding="utf-8") as mdFile:
+        for line in mdFile:
+            # search for images in each line and ignore http/https image links
+            # Pattern: \A!\[.*]\(.*\)\Z
+            # example:  ![test](/data_images/test_image.jpg)
+            result = re.findall("\A!\[.*]\((?!http)(.*)\)", line)
+
+            if bool(result):   # line contains an image
+                # extract filename from the full path
+                result = str(result).split('\'')[1]  # ['/data_images/test_image.jpg'] => /data_images/test_image.jpg
+                result = str(result).split('/')[-1]  # /data_images/test_image.jpg => test_image.jpg
+                logging.debug("Found file for attaching: " + result)
+                filesToUpload.append(result)
+                # replace line with conflunce storage format <ac:image> <ri:attachment ri:filename="test_image.jpg" /></ac:image>
+                newFileContent += "<ac:image> <ri:attachment ri:filename=\"" + result + "\" /></ac:image>"
+            else:  # line without an image
+                newFileContent += line
+
+    # Create new page with unique title (relative path)
+    result = createPage(
+        title=rel_path,
+        content=markdown.markdown(newFileContent, extensions=['markdown.extensions.tables', 'fenced_code']),
+        parentPageID=parentPageID,
+        login=login,
+        password=password
+    )
+
+    # Track result
+    if result['success']:
+        _stats.add_success(operation=result.get('operation'))
+        pageID = result['page_id']
+
+        # if do exist files to Upload as attachments
+        if bool(filesToUpload):
+            for file in filesToUpload:
+                imagePath = str(CONFIG["github_folder_with_image_files"]) + "/" + file  # full path of uploaded image file
+                if os.path.isfile(imagePath):  # check if the  file exist
+                    logging.info("Attaching file: " + imagePath + "  to the page: " + str(pageID))
+                    with open(imagePath, 'rb') as attachedFile:
+                        attachFile(
+                            pageIdForFileAttaching=pageID,
+                            attachedFile=attachedFile,
+                            login=login,
+                            password=password
+                        )
+                else:
+                    logging.error("File: " + str(imagePath) + "  not found. Nothing to attach")
+    else:
+        # Log error and continue processing
+        error_info = {
+            'path': str(file_entry.path),
+            'type': 'file',
+            'error': result.get('error', 'Unknown error'),
+            'status_code': result.get('status_code', 'N/A')
+        }
+        _stats.add_error(error_info)
+        logging.warning(f"Skipping file {file_entry.path} due to error")
+
+    return result
+
+
+def publishFolder(folder, login, password, parentPageID=None, base_folder=None, executor=None):
+    """
+    Recursively publish folders and files to Confluence with parallel processing.
 
     Args:
         folder: Current folder being processed
@@ -74,125 +180,110 @@ def publishFolder(folder, login, password, parentPageID = None, base_folder = No
         password: Confluence API token
         parentPageID: Parent page ID in Confluence (None for root)
         base_folder: Base folder for calculating relative paths (for unique titles)
+        executor: ThreadPoolExecutor for parallel processing (created on first call)
     """
-    global publish_errors, success_count, created_count, updated_count
-
-    # On first call, set base_folder to the initial folder
+    # Initialize base_folder on first call
     if base_folder is None:
         base_folder = os.path.abspath(folder)
 
-    logging.info("Publishing folder: " + folder)
+    # Create executor on first call (shared across all recursive calls)
+    is_root = executor is None
+    if is_root:
+        executor = ThreadPoolExecutor(max_workers=2)  # Conservative: 2 workers
+        logging.info("Initialized parallel executor with 2 workers")
 
-    for entry in os.scandir(folder):
-        if entry.is_dir():
-            # Calculate unique title using relative path from base folder
-            rel_path = os.path.relpath(entry.path, base_folder)
-            rel_path = rel_path.replace(os.sep, '/')  # Normalize to forward slashes
+    try:
+        logging.info("Publishing folder: " + folder)
 
-            # create page with the DISPLAY CHILDREN macro for the directories in the folder with MD files
-            logging.info("Found directory: " + str(entry.path))
-            result = createPage(title=rel_path,
-                content="<ac:structured-macro ac:name=\"children\" ac:schema-version=\"2\" ac:macro-id=\"80b8c33e-cc87-4987-8f88-dd36ee991b15\"/>", # name of the DISPLAY CHILDREN macro
-                parentPageID = parentPageID,
-                login=login,
-                password=password)
+        # Collect entries
+        dirs = []
+        files = []
+        for entry in os.scandir(folder):
+            if entry.is_dir():
+                dirs.append(entry)
+            elif entry.is_file() and str(entry.path).lower().endswith('.md'):
+                files.append(entry)
 
-            # Check if page creation was successful
-            if result['success']:
-                success_count += 1
-                if result.get('operation') == 'created':
-                    created_count += 1
-                elif result.get('operation') == 'updated':
-                    updated_count += 1
-                currentPageID = result['page_id']
-                # publish files in the current folder (pass base_folder through)
-                publishFolder(folder=entry.path, login=login, password=password, parentPageID=currentPageID, base_folder=base_folder)
-            else:
-                # Log error and continue processing
-                error_info = {
-                    'path': str(entry.path),
-                    'type': 'directory',
-                    'error': result.get('error', 'Unknown error'),
-                    'status_code': result.get('status_code', 'N/A')
-                }
-                publish_errors.append(error_info)
-                logging.warning(f"Skipping directory {entry.path} and its children due to error")
-                # Don't recurse into this directory since we couldn't create the parent page
-            
-        elif entry.is_file():
-            logging.info("Found file: " + str(entry.path))
+        # PHASE 1: Process all subdirectories in parallel
+        if dirs:
+            logging.info(f"Processing {len(dirs)} subdirectories in parallel...")
+            dir_futures = {}
 
-            if str(entry.path).lower().endswith('.md'): # chech for correct file extension
-                # Calculate unique title using relative path from base folder
-                rel_path = os.path.relpath(entry.path, base_folder)
-                rel_path = rel_path.replace(os.sep, '/')  # Normalize to forward slashes
+            for dir_entry in dirs:
+                # Calculate unique title
+                rel_path = os.path.relpath(dir_entry.path, base_folder)
+                rel_path = rel_path.replace(os.sep, '/')
 
-                newFileContent = ""
-                filesToUpload = []
-                with open(entry.path, 'r', encoding="utf-8") as mdFile:
-                    for line in mdFile:
+                # Create directory page (must be sequential - need page ID)
+                logging.info(f"Creating directory page: {rel_path}")
+                result = createPage(
+                    title=rel_path,
+                    content="<ac:structured-macro ac:name=\"children\" ac:schema-version=\"2\" ac:macro-id=\"80b8c33e-cc87-4987-8f88-dd36ee991b15\"/>",
+                    parentPageID=parentPageID,
+                    login=login,
+                    password=password
+                )
 
-                        # search for images in each line and ignore http/https image links
-                        # Pattern: \A!\[.*]\(.*\)\Z
-                        # example:  ![test](/data_images/test_image.jpg)
+                if result['success']:
+                    _stats.add_success(operation=result.get('operation'))
+                    currentPageID = result['page_id']
 
-                        result = re.findall("\A!\[.*]\((?!http)(.*)\)", line)
-
-                        if bool(result):   # line contains an image
-                            # extract filename from the full path
-                            result = str(result).split('\'')[1]  # ['/data_images/test_image.jpg'] => /data_images/test_image.jpg
-                            result = str(result).split('/')[-1]  # /data_images/test_image.jpg => test_image.jpg
-                            logging.debug("Found file for attaching: " + result)
-                            filesToUpload.append(result)
-                            # replace line with conflunce storage format <ac:image> <ri:attachment ri:filename="test_image.jpg" /></ac:image>
-                            newFileContent += "<ac:image> <ri:attachment ri:filename=\"" + result + "\" /></ac:image>"
-                        else:  # line without an image
-                            newFileContent += line
-
-                    # create new page with unique title (relative path)
-                    result = createPage(title=rel_path,
-                        content=markdown.markdown(newFileContent, extensions=['markdown.extensions.tables', 'fenced_code']),
-                        parentPageID = parentPageID,
+                    # Submit recursive call to thread pool
+                    future = executor.submit(
+                        publishFolder,
+                        folder=dir_entry.path,
                         login=login,
-                        password=password)
+                        password=password,
+                        parentPageID=currentPageID,
+                        base_folder=base_folder,
+                        executor=executor
+                    )
+                    dir_futures[future] = dir_entry.path
+                else:
+                    _stats.add_error({
+                        'path': str(dir_entry.path),
+                        'type': 'directory',
+                        'error': result.get('error', 'Unknown error'),
+                        'status_code': result.get('status_code', 'N/A')
+                    })
+                    logging.warning(f"Skipping directory {dir_entry.path} and its children due to error")
 
-                    # Check if page creation was successful
-                    if result['success']:
-                        success_count += 1
-                        if result.get('operation') == 'created':
-                            created_count += 1
-                        elif result.get('operation') == 'updated':
-                            updated_count += 1
-                        pageIDforFileAttaching = result['page_id']
+            # Wait for all subdirectory processing to complete
+            for future in as_completed(dir_futures):
+                path = dir_futures[future]
+                try:
+                    future.result()  # Blocks until complete
+                    logging.debug(f"Completed directory: {path}")
+                except Exception as e:
+                    logging.error(f"Error processing directory {path}: {e}")
 
-                        # if do exist files to Upload as attachments
-                        if bool(filesToUpload):
-                            for file in filesToUpload:
-                                imagePath = str(CONFIG["github_folder_with_image_files"]) + "/" + file #full path of uploaded image file
-                                if os.path.isfile(imagePath): # check if the  file exist
-                                    logging.info("Attaching file: " + imagePath + "  to the page: " + str(pageIDforFileAttaching))
-                                    with open(imagePath, 'rb') as attachedFile:
-                                        attachFile(pageIdForFileAttaching=pageIDforFileAttaching,
-                                            attachedFile=attachedFile,
-                                            login=login,
-                                            password=password)
-                                else:
-                                    logging.error("File: " + str(imagePath) + "  not found. Nothing to attach")
-                    else:
-                        # Log error and continue processing
-                        error_info = {
-                            'path': str(entry.path),
-                            'type': 'file',
-                            'error': result.get('error', 'Unknown error'),
-                            'status_code': result.get('status_code', 'N/A')
-                        }
-                        publish_errors.append(error_info)
-                        logging.warning(f"Skipping file {entry.path} due to error")
-            else:
-                logging.info("File: " + str(entry.path) + "  is not a MD file. Publishing has rejected")
+        # PHASE 2: Process all files in parallel
+        if files:
+            logging.info(f"Processing {len(files)} files in parallel...")
+            file_futures = {}
 
-        elif entry.is_symlink():
-            logging.info("Found symlink: " + str(entry.path))
+            for file_entry in files:
+                future = executor.submit(
+                    processMarkdownFile,
+                    file_entry=file_entry,
+                    parentPageID=parentPageID,
+                    login=login,
+                    password=password,
+                    base_folder=base_folder
+                )
+                file_futures[future] = file_entry.path
 
-        else:
-            logging.info("Found unknown type of entry (not file, not directory, not symlink) " + str(entry.path))
+            # Wait for all file processing to complete
+            for future in as_completed(file_futures):
+                path = file_futures[future]
+                try:
+                    future.result()
+                    logging.debug(f"Completed file: {path}")
+                except Exception as e:
+                    logging.error(f"Error processing file {path}: {e}")
+
+    finally:
+        # Shutdown executor only at root level
+        if is_root:
+            executor.shutdown(wait=True)
+            logging.info("Parallel executor shutdown complete")
