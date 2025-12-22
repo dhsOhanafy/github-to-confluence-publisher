@@ -3,8 +3,8 @@ import logging
 import sys
 
 from config.getconfig import getConfig
-from pagesController import deletePages, searchPages
-from pagesPublisher import publishFolder, publish_errors, success_count, created_count, updated_count
+from pagesController import cleanupOrphanPages
+from pagesPublisher import publishFolder, buildExpectedPagesSet, publish_errors, success_count, created_count, updated_count
 
 logging.basicConfig(level=logging.INFO)
 
@@ -21,12 +21,39 @@ CONFIG = getConfig()
 
 logging.debug(CONFIG)
 
-pages = searchPages(login=inputArguments['login'], password=inputArguments['password'])
-deletePages(pagesIDList=pages, login=inputArguments['login'], password=inputArguments['password'])
+# Step 1: Build expected pages set from local files
+logging.info("=" * 80)
+logging.info("PHASE 1: Building expected pages inventory")
+logging.info("=" * 80)
+expected_pages = buildExpectedPagesSet(folder=str(CONFIG["github_folder_with_md_files"]))
 
+# Step 2: Publish all pages (UPDATE-or-CREATE)
+logging.info("\n" + "=" * 80)
+logging.info("PHASE 2: Publishing documentation (UPDATE-or-CREATE)")
+logging.info("=" * 80)
 publishFolder(folder = str(CONFIG["github_folder_with_md_files"]),
   login=inputArguments['login'],
   password=inputArguments['password'])
+
+# Step 3: Cleanup orphan pages (only if publish was successful)
+logging.info("\n" + "=" * 80)
+logging.info("PHASE 3: Differential cleanup (orphan pages)")
+logging.info("=" * 80)
+
+if len(publish_errors) == 0:
+    cleanup_result = cleanupOrphanPages(
+        expected_pages_set=expected_pages,
+        login=inputArguments['login'],
+        password=inputArguments['password']
+    )
+
+    if cleanup_result.get('skipped'):
+        logging.warning(f"⚠️  Cleanup skipped: {cleanup_result.get('reason')}")
+    else:
+        logging.info(f"✅ Cleanup complete: {cleanup_result['deleted_count']} orphans removed")
+else:
+    logging.warning("⚠️  Skipping cleanup due to publishing errors")
+    logging.warning("   Fix errors and re-run to clean up orphans")
 
 # Print summary report
 print("\n" + "="*80)

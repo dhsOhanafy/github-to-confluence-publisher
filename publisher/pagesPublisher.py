@@ -15,6 +15,36 @@ success_count = 0
 created_count = 0
 updated_count = 0
 
+
+def buildExpectedPagesSet(folder):
+    """
+    Build set of expected page titles from local markdown files and directories.
+
+    Walks the entire directory tree and collects:
+    - Directory names (become directory pages with CHILDREN macro)
+    - .md filenames (become content pages)
+
+    Returns: Set of page titles (without search pattern suffix)
+    """
+    expected_pages = set()
+
+    logging.info(f"Building expected pages set from: {folder}")
+
+    for root, dirs, files in os.walk(folder):
+        # Add directory names as expected pages
+        for dir_name in dirs:
+            expected_pages.add(dir_name)
+            logging.debug(f"Expected directory page: {dir_name}")
+
+        # Add .md filenames as expected pages
+        for filename in files:
+            if filename.lower().endswith('.md'):
+                expected_pages.add(filename)
+                logging.debug(f"Expected file page: {filename}")
+
+    logging.info(f"Built expected pages set: {len(expected_pages)} pages")
+    return expected_pages
+
 def publishFolder(folder, login, password, parentPageID = None): # parentPageID has the default input parameter "None" (it means ROOT)
     global publish_errors, success_count, created_count, updated_count
     logging.info("Publishing folder: " + folder)

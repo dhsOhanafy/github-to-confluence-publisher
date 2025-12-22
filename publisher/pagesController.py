@@ -18,9 +18,15 @@ requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
 #
 def findPageByTitle(title, parentPageID, login, password):
     """
-    Search for existing page by exact title and parent.
+    Search for existing page by exact title with retry logic.
+
+    Uses ancestor= instead of parent= to find pages at any depth in the hierarchy.
+    Implements retry logic to handle Confluence search index eventual consistency.
+
     Returns page dict with 'id' and 'version' if found, None otherwise.
     """
+    import time
+
     # Support both typo and correct spelling for backwards compatibility
     parent_id = CONFIG.get("confluence_parent_page_id") or CONFIG.get("counfluence_parent_page_id")
     if parentPageID is None:
@@ -28,42 +34,67 @@ def findPageByTitle(title, parentPageID, login, password):
     else:
         parent_id_to_use = str(parentPageID)
 
-    # Build search query - exact title match with parent constraint
-    # CQL: title="exact title" AND parent={id} AND space="key"
+    # Build search query - exact title match with ancestor constraint
+    # CQL: title="exact title" AND ancestor={id} AND space="key"
+    # NOTE: ancestor= finds pages at ANY depth, not just direct children
     search_title = title + "  " + str(CONFIG["confluence_search_pattern"])
-    cql_query = f'title="{search_title}" AND parent={parent_id_to_use} AND space="{CONFIG["confluence_space"]}"'
+    cql_query = f'title="{search_title}" AND ancestor={parent_id_to_use} AND space="{CONFIG["confluence_space"]}"'
 
     # URL-encode the CQL query to handle special characters
     encoded_cql = quote(cql_query)
 
     logging.debug(f"Searching for existing page: {cql_query}")
-    logging.debug(f"Encoded CQL: {encoded_cql}")
 
-    try:
-        response = requests.get(
-            url=f'{CONFIG["confluence_url"]}search?cql={encoded_cql}&limit=5&expand=version',
-            auth=HTTPBasicAuth(login, password),
-            verify=False
-        )
+    # Retry logic to handle eventual consistency
+    max_retries = 3
+    retry_delays = [0, 2, 4]  # 0s, 2s, 4s delays
 
-        if response.status_code == 200:
-            results = json.loads(response.text)
-            if results.get('size', 0) > 0:
-                # Found existing page
-                page_data = results['results'][0]['content']
-                logging.info(f"Found existing page: {page_data['id']} (v{page_data['version']['number']})")
-                return {
-                    'id': page_data['id'],
-                    'version': page_data['version']['number'],
-                    'title': page_data['title']
-                }
+    for attempt in range(max_retries):
+        try:
+            if attempt > 0:
+                delay = retry_delays[attempt]
+                logging.debug(f"Retry {attempt}/{max_retries-1} after {delay}s delay (eventual consistency)")
+                time.sleep(delay)
 
-        logging.debug("No existing page found")
-        return None
+            response = requests.get(
+                url=f'{CONFIG["confluence_url"]}search?cql={encoded_cql}&limit=5&expand=version',
+                auth=HTTPBasicAuth(login, password),
+                verify=False,
+                timeout=10
+            )
 
-    except Exception as e:
-        logging.warning(f"Error searching for existing page: {e}")
-        return None
+            if response.status_code == 200:
+                results = json.loads(response.text)
+                if results.get('size', 0) > 0:
+                    # Found existing page
+                    page_data = results['results'][0]['content']
+                    logging.info(f"Found existing page: {page_data['id']} (v{page_data['version']['number']})")
+                    return {
+                        'id': page_data['id'],
+                        'version': page_data['version']['number'],
+                        'title': page_data['title']
+                    }
+                elif attempt < max_retries - 1:
+                    # Not found yet, but we have retries left
+                    logging.debug(f"Page not found on attempt {attempt + 1}, will retry...")
+                    continue
+                else:
+                    # Final attempt, page truly doesn't exist
+                    logging.debug("No existing page found after all retries")
+                    return None
+            else:
+                logging.warning(f"Search failed with status {response.status_code}")
+                if attempt < max_retries - 1:
+                    continue
+                return None
+
+        except Exception as e:
+            logging.warning(f"Error searching for existing page (attempt {attempt + 1}): {e}")
+            if attempt < max_retries - 1:
+                continue
+            return None
+
+    return None
 
 
 #
@@ -347,8 +378,125 @@ def searchPages(login, password):
 
 
 #
+# Function for cleanup of orphan pages (differential cleanup)
+#
+def cleanupOrphanPages(expected_pages_set, login, password):
+    """
+    Delete autogenerated pages that don't match any local files (orphans).
+
+    This implements differential cleanup: only deletes pages that shouldn't exist,
+    leaving all valid pages intact.
+
+    Args:
+        expected_pages_set: Set of expected page base titles (from local files)
+        login: Confluence email
+        password: Confluence API token
+
+    Returns:
+        dict with 'deleted_count' and 'orphans' list
+    """
+    logging.info("Starting differential orphan cleanup...")
+    logging.info(f"Expected pages: {len(expected_pages_set)}")
+
+    # Find all autogenerated pages using paginated search
+    all_pages = searchPages(login, password)
+    logging.info(f"Found {len(all_pages)} autogenerated pages in Confluence")
+
+    if not all_pages:
+        logging.info("No pages to clean up")
+        return {'deleted_count': 0, 'orphans': []}
+
+    # Identify orphans by comparing against expected pages
+    orphan_ids = []
+    orphan_details = []
+
+    # Need to fetch page titles to compare
+    # Unfortunately, searchPages() only returns IDs, not titles
+    # We need to query each page's title or use a different approach
+
+    logging.info("Identifying orphans (this may take a moment)...")
+
+    # Import here to avoid circular dependency
+    import requests
+    from requests.auth import HTTPBasicAuth
+
+    for page_id in all_pages:
+        try:
+            # Fetch page details to get title
+            response = requests.get(
+                url=f'{CONFIG["confluence_url"]}content/{page_id}',
+                auth=HTTPBasicAuth(login, password),
+                verify=False,
+                timeout=10
+            )
+
+            if response.status_code == 200:
+                page_data = response.json()
+                full_title = page_data.get('title', '')
+
+                # Extract base title by removing search pattern
+                search_pattern = str(CONFIG["confluence_search_pattern"])
+                if search_pattern in full_title:
+                    base_title = full_title.replace(f"  {search_pattern}", "").strip()
+                else:
+                    base_title = full_title
+
+                # Check if this page should exist
+                if base_title not in expected_pages_set:
+                    orphan_ids.append(page_id)
+                    orphan_details.append({
+                        'id': page_id,
+                        'title': full_title,
+                        'base_title': base_title
+                    })
+                    logging.debug(f"Orphan identified: {base_title} (ID: {page_id})")
+                else:
+                    logging.debug(f"Valid page: {base_title}")
+
+        except Exception as e:
+            logging.warning(f"Error checking page {page_id}: {e}")
+            continue
+
+    # Safety check: prevent accidental mass deletion
+    orphan_count = len(orphan_ids)
+    total_pages = len(all_pages)
+
+    if orphan_count > 0:
+        orphan_percentage = (orphan_count / total_pages) * 100
+        logging.info(f"Identified {orphan_count} orphan pages ({orphan_percentage:.1f}% of total)")
+
+        # Safety threshold: if >20% would be deleted, require confirmation
+        if orphan_percentage > 20:
+            logging.warning(f"⚠️  Safety threshold exceeded: {orphan_percentage:.1f}% would be deleted")
+            logging.warning(f"   Expected: {len(expected_pages_set)} pages")
+            logging.warning(f"   Found: {total_pages} pages")
+            logging.warning(f"   Orphans: {orphan_count} pages")
+            logging.warning(f"   Skipping cleanup for safety. Review expected pages set.")
+            return {
+                'deleted_count': 0,
+                'orphans': orphan_details,
+                'skipped': True,
+                'reason': f'Safety threshold exceeded ({orphan_percentage:.1f}% > 20%)'
+            }
+
+        # Delete orphans
+        logging.info(f"Deleting {orphan_count} orphan pages...")
+        deleted = deletePages(orphan_ids, login, password)
+
+        logging.info(f"✅ Cleanup complete: {orphan_count} orphan pages deleted")
+        return {
+            'deleted_count': orphan_count,
+            'orphans': orphan_details,
+            'skipped': False
+        }
+    else:
+        logging.info("✅ No orphan pages found - all pages match local files")
+        return {'deleted_count': 0, 'orphans': [], 'skipped': False}
+
+
+#
 # Function for deleting pages
-# 
+#
 def deletePages(pagesIDList, login, password):
 
 
