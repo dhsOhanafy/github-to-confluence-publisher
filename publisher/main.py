@@ -21,20 +21,19 @@ CONFIG = getConfig()
 
 logging.debug(CONFIG)
 
-# TEMPORARY: Clean slate migration - delete all old pages with old titles
-# This will be removed after one run
+# Step 1: Build expected pages set from local files
 logging.info("=" * 80)
-logging.info("MIGRATION: Deleting all pages with old title format")
+logging.info("PHASE 1: Building expected pages inventory")
 logging.info("=" * 80)
-from pagesController import searchPages, deletePages
-pages = searchPages(login=inputArguments['login'], password=inputArguments['password'])
-deletePages(pagesIDList=pages, login=inputArguments['login'], password=inputArguments['password'])
-logging.info(f"Deleted {len(pages)} pages")
+expected_pages = buildExpectedPagesSet(folder=str(CONFIG["github_folder_with_md_files"]))
 
-# Skip publishing on this run to avoid conflicts
-logging.info("\n⚠️  Clean slate complete - skipping publish")
-logging.info("   Remove DELETE code and re-run to publish with new titles")
-sys.exit(0)
+# Step 2: Publish all pages (UPDATE-or-CREATE)
+logging.info("\n" + "=" * 80)
+logging.info("PHASE 2: Publishing documentation (UPDATE-or-CREATE)")
+logging.info("=" * 80)
+publishFolder(folder = str(CONFIG["github_folder_with_md_files"]),
+  login=inputArguments['login'],
+  password=inputArguments['password'])
 
 # Step 3: Cleanup orphan pages (only if publish was successful)
 logging.info("\n" + "=" * 80)
