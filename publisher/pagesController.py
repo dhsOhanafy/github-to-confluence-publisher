@@ -67,12 +67,35 @@ def findPageByTitle(title, parentPageID, login, password):
                 results = json.loads(response.text)
                 if results.get('size', 0) > 0:
                     # Found existing page
-                    page_data = results['results'][0]['content']
-                    logging.info(f"Found existing page: {page_data['id']} (v{page_data['version']['number']})")
+                    # Search API returns results[0] with 'content' and 'version' at same level
+                    result = results['results'][0]
+                    page_data = result.get('content', result)  # Fallback to result if no content key
+
+                    # Version might be at result level or content level
+                    version_data = result.get('version', page_data.get('version'))
+
+                    if version_data and 'number' in version_data:
+                        version_num = version_data['number']
+                    else:
+                        # Fallback: fetch full page details to get version
+                        logging.debug(f"Version not in search results, fetching page details for {page_data['id']}")
+                        page_resp = requests.get(
+                            url=f'{CONFIG["confluence_url"]}content/{page_data["id"]}',
+                            auth=HTTPBasicAuth(login, password),
+                            verify=False,
+                            timeout=10
+                        )
+                        if page_resp.status_code == 200:
+                            full_page = page_resp.json()
+                            version_num = full_page.get('version', {}).get('number', 1)
+                        else:
+                            version_num = 1  # Default if we can't get version
+
+                    logging.info(f"Found existing page: {page_data['id']} (v{version_num})")
                     return {
                         'id': page_data['id'],
-                        'version': page_data['version']['number'],
-                        'title': page_data['title']
+                        'version': version_num,
+                        'title': page_data.get('title', '')
                     }
                 elif attempt < max_retries - 1:
                     # Not found yet, but we have retries left
