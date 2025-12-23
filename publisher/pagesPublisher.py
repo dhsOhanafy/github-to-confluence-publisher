@@ -269,8 +269,8 @@ def publishFolder(folder, login, password, parentPageID=None, base_folder=None, 
     # Create executor on first call (shared across all recursive calls)
     is_root = executor is None
     if is_root:
-        executor = ThreadPoolExecutor(max_workers=4)  # For parallel file processing
-        logging.info("Initialized parallel executor with 4 workers for file processing")
+        executor = ThreadPoolExecutor(max_workers=8)  # For parallel file processing
+        logging.info("Initialized parallel executor with 8 workers for file processing")
 
         # Count total pages for progress tracking
         total_dirs = 0
