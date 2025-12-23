@@ -3,6 +3,7 @@ import os
 import markdown
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from config.getconfig import getConfig
 from pagesController import createPage
@@ -13,7 +14,7 @@ CONFIG = getConfig()
 
 
 class PublishStats:
-    """Thread-safe statistics tracking for parallel publishing."""
+    """Thread-safe statistics tracking for parallel publishing with progress logging."""
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -21,6 +22,16 @@ class PublishStats:
         self.success_count = 0
         self.created_count = 0
         self.updated_count = 0
+        self.total_pages = 0
+        self.start_time = None
+        self.last_progress_log = 0
+
+    def set_total(self, total):
+        """Set total expected pages for progress tracking."""
+        with self.lock:
+            self.total_pages = total
+            self.start_time = time.time()
+            logging.info(f"📊 PROGRESS TRACKING: {total} total pages to process")
 
     def add_success(self, operation=None):
         with self.lock:
@@ -29,10 +40,76 @@ class PublishStats:
                 self.created_count += 1
             elif operation == 'updated':
                 self.updated_count += 1
+            self._log_progress_if_needed()
 
     def add_error(self, error_info):
         with self.lock:
             self.errors.append(error_info)
+            self._log_progress_if_needed()
+
+    def _log_progress_if_needed(self):
+        """Log progress every 50 pages or 30 seconds."""
+        completed = self.success_count + len(self.errors)
+
+        # Log every 50 pages
+        if completed > 0 and completed % 50 == 0 and completed != self.last_progress_log:
+            self.last_progress_log = completed
+            self._log_progress()
+
+    def _log_progress(self):
+        """Log current progress metrics."""
+        completed = self.success_count + len(self.errors)
+        elapsed = time.time() - self.start_time if self.start_time else 0
+
+        if self.total_pages > 0:
+            pct = (completed / self.total_pages) * 100
+            remaining = self.total_pages - completed
+
+            # Estimate time remaining
+            if completed > 0 and elapsed > 0:
+                rate = completed / elapsed
+                eta_seconds = remaining / rate if rate > 0 else 0
+                eta_min = int(eta_seconds // 60)
+                eta_sec = int(eta_seconds % 60)
+                eta_str = f"{eta_min}m {eta_sec}s"
+            else:
+                eta_str = "calculating..."
+
+            logging.info(
+                f"📈 PROGRESS: {completed}/{self.total_pages} ({pct:.1f}%) | "
+                f"✅ {self.success_count} success | ❌ {len(self.errors)} errors | "
+                f"⏱️ {int(elapsed)}s elapsed | ETA: {eta_str}"
+            )
+        else:
+            logging.info(
+                f"📈 PROGRESS: {completed} completed | "
+                f"✅ {self.success_count} success | ❌ {len(self.errors)} errors | "
+                f"⏱️ {int(elapsed)}s elapsed"
+            )
+
+    def log_final_summary(self):
+        """Log final summary when publishing is complete."""
+        with self.lock:
+            completed = self.success_count + len(self.errors)
+            elapsed = time.time() - self.start_time if self.start_time else 0
+
+            logging.info("=" * 80)
+            logging.info("📊 FINAL PUBLISHING SUMMARY")
+            logging.info("=" * 80)
+            logging.info(f"Total pages processed: {completed}/{self.total_pages}")
+            logging.info(f"✅ Successful: {self.success_count} ({self.created_count} created, {self.updated_count} updated)")
+            logging.info(f"❌ Errors: {len(self.errors)}")
+
+            if self.total_pages > 0:
+                success_rate = (self.success_count / self.total_pages) * 100
+                logging.info(f"📈 Success Rate: {success_rate:.1f}%")
+
+            if elapsed > 0:
+                rate = completed / elapsed
+                logging.info(f"⏱️ Total time: {int(elapsed)}s ({elapsed/60:.1f} minutes)")
+                logging.info(f"⚡ Average rate: {rate:.2f} pages/second")
+
+            logging.info("=" * 80)
 
 
 # Create global instance
@@ -195,6 +272,14 @@ def publishFolder(folder, login, password, parentPageID=None, base_folder=None, 
         executor = ThreadPoolExecutor(max_workers=4)  # For parallel file processing
         logging.info("Initialized parallel executor with 4 workers for file processing")
 
+        # Count total pages for progress tracking
+        total_dirs = 0
+        total_files = 0
+        for root, dirs, files in os.walk(folder):
+            total_dirs += len(dirs)
+            total_files += len([f for f in files if f.lower().endswith('.md')])
+        _stats.set_total(total_dirs + total_files)
+
     try:
         logging.info("Publishing folder: " + folder)
 
@@ -276,3 +361,4 @@ def publishFolder(folder, login, password, parentPageID=None, base_folder=None, 
         if is_root:
             executor.shutdown(wait=True)
             logging.info("Parallel executor shutdown complete")
+            _stats.log_final_summary()
