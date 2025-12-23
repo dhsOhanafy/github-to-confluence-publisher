@@ -16,6 +16,49 @@ requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
 #
 # Function to check if page exists by title and parent
 #
+def findPageByTitleDirect(full_title, login, password):
+    """
+    Find page by exact title using Content API (more reliable than CQL search).
+
+    This bypasses the search index entirely by using the content API with title filter.
+    Much more reliable for eventual consistency issues.
+
+    Returns page dict with 'id' and 'version' if found, None otherwise.
+    """
+    try:
+        # Use content API with title parameter - bypasses search index
+        # This is the most reliable way to find a page by exact title
+        encoded_title = quote(full_title)
+        url = f'{CONFIG["confluence_url"]}content?title={encoded_title}&spaceKey={CONFIG["confluence_space"]}&expand=version'
+
+        logging.debug(f"Direct lookup: {full_title}")
+
+        response = requests.get(
+            url=url,
+            auth=HTTPBasicAuth(login, password),
+            verify=False,
+            timeout=15
+        )
+
+        if response.status_code == 200:
+            results = response.json()
+            if results.get('size', 0) > 0:
+                page = results['results'][0]
+                version_num = page.get('version', {}).get('number', 1)
+                logging.info(f"Direct lookup found page: {page['id']} (v{version_num})")
+                return {
+                    'id': page['id'],
+                    'version': version_num,
+                    'title': page.get('title', '')
+                }
+
+        return None
+
+    except Exception as e:
+        logging.warning(f"Direct lookup error: {e}")
+        return None
+
+
 def findPageByTitle(title, parentPageID, login, password):
     """
     Search for existing page by exact title with retry logic.
@@ -232,6 +275,9 @@ def updatePage(page_id, title, content, version, login, password):
 def createNewPage(title, content, parentPageID, login, password):
     """
     Create new Confluence page via POST request.
+
+    BULLETPROOF: If creation fails with "title already exists", uses direct
+    Content API lookup (bypasses search index) to find and update the page.
     """
     # descripe json query
     newPageJSONQueryString = """
@@ -309,6 +355,44 @@ def createNewPage(title, content, parentPageID, login, password):
     else:
         # Page creation failed
         error_message = response_json.get('message', 'Unknown error')
+
+        # BULLETPROOF FIX: Handle "title already exists" by using direct lookup
+        if 'already exists' in error_message.lower() or 'same title' in error_message.lower():
+            logging.warning(f"Title exists but search didn't find it - using direct Content API lookup")
+
+            # Use direct Content API lookup (bypasses search index entirely)
+            existing_page = findPageByTitleDirect(title, login, password)
+
+            if existing_page:
+                logging.info(f"Direct lookup found page {existing_page['id']} - updating instead")
+                return updatePage(
+                    page_id=existing_page['id'],
+                    title=title,
+                    content=content,
+                    version=existing_page['version'],
+                    login=login,
+                    password=password
+                )
+            else:
+                # Last resort: wait and retry direct lookup
+                import time
+                logging.warning("Direct lookup failed, waiting 3s and retrying...")
+                time.sleep(3)
+
+                existing_page = findPageByTitleDirect(title, login, password)
+                if existing_page:
+                    logging.info(f"Retry found page {existing_page['id']} - updating")
+                    return updatePage(
+                        page_id=existing_page['id'],
+                        title=title,
+                        content=content,
+                        version=existing_page['version'],
+                        login=login,
+                        password=password
+                    )
+
+                logging.error(f"Could not find page even with direct lookup: {title}")
+
         logging.error(f"Page creation failed: {error_message}")
         return {
             'success': False,
