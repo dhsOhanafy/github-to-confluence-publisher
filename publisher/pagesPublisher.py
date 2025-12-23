@@ -172,7 +172,10 @@ def processMarkdownFile(file_entry, parentPageID, login, password, base_folder):
 
 def publishFolder(folder, login, password, parentPageID=None, base_folder=None, executor=None):
     """
-    Recursively publish folders and files to Confluence with parallel processing.
+    Recursively publish folders and files to Confluence.
+
+    Directories are processed SEQUENTIALLY (to avoid thread pool deadlock).
+    Files within each directory are processed in PARALLEL for speedup.
 
     Args:
         folder: Current folder being processed
@@ -180,7 +183,7 @@ def publishFolder(folder, login, password, parentPageID=None, base_folder=None, 
         password: Confluence API token
         parentPageID: Parent page ID in Confluence (None for root)
         base_folder: Base folder for calculating relative paths (for unique titles)
-        executor: ThreadPoolExecutor for parallel processing (created on first call)
+        executor: ThreadPoolExecutor for parallel file processing (created on first call)
     """
     # Initialize base_folder on first call
     if base_folder is None:
@@ -189,8 +192,8 @@ def publishFolder(folder, login, password, parentPageID=None, base_folder=None, 
     # Create executor on first call (shared across all recursive calls)
     is_root = executor is None
     if is_root:
-        executor = ThreadPoolExecutor(max_workers=2)  # Conservative: 2 workers
-        logging.info("Initialized parallel executor with 2 workers")
+        executor = ThreadPoolExecutor(max_workers=4)  # For parallel file processing
+        logging.info("Initialized parallel executor with 4 workers for file processing")
 
     try:
         logging.info("Publishing folder: " + folder)
@@ -204,60 +207,46 @@ def publishFolder(folder, login, password, parentPageID=None, base_folder=None, 
             elif entry.is_file() and str(entry.path).lower().endswith('.md'):
                 files.append(entry)
 
-        # PHASE 1: Process all subdirectories in parallel
-        if dirs:
-            logging.info(f"Processing {len(dirs)} subdirectories in parallel...")
-            dir_futures = {}
+        # PHASE 1: Process all subdirectories SEQUENTIALLY (avoids deadlock)
+        # Each directory page must be created before its children can be processed
+        for dir_entry in dirs:
+            # Calculate unique title
+            rel_path = os.path.relpath(dir_entry.path, base_folder)
+            rel_path = rel_path.replace(os.sep, '/')
 
-            for dir_entry in dirs:
-                # Calculate unique title
-                rel_path = os.path.relpath(dir_entry.path, base_folder)
-                rel_path = rel_path.replace(os.sep, '/')
+            # Create directory page
+            logging.info(f"Creating directory page: {rel_path}")
+            result = createPage(
+                title=rel_path,
+                content="<ac:structured-macro ac:name=\"children\" ac:schema-version=\"2\" ac:macro-id=\"80b8c33e-cc87-4987-8f88-dd36ee991b15\"/>",
+                parentPageID=parentPageID,
+                login=login,
+                password=password
+            )
 
-                # Create directory page (must be sequential - need page ID)
-                logging.info(f"Creating directory page: {rel_path}")
-                result = createPage(
-                    title=rel_path,
-                    content="<ac:structured-macro ac:name=\"children\" ac:schema-version=\"2\" ac:macro-id=\"80b8c33e-cc87-4987-8f88-dd36ee991b15\"/>",
-                    parentPageID=parentPageID,
+            if result['success']:
+                _stats.add_success(operation=result.get('operation'))
+                currentPageID = result['page_id']
+
+                # Recursively process subdirectory (SEQUENTIAL - no thread pool for directories)
+                publishFolder(
+                    folder=dir_entry.path,
                     login=login,
-                    password=password
+                    password=password,
+                    parentPageID=currentPageID,
+                    base_folder=base_folder,
+                    executor=executor  # Pass executor for file processing
                 )
+            else:
+                _stats.add_error({
+                    'path': str(dir_entry.path),
+                    'type': 'directory',
+                    'error': result.get('error', 'Unknown error'),
+                    'status_code': result.get('status_code', 'N/A')
+                })
+                logging.warning(f"Skipping directory {dir_entry.path} and its children due to error")
 
-                if result['success']:
-                    _stats.add_success(operation=result.get('operation'))
-                    currentPageID = result['page_id']
-
-                    # Submit recursive call to thread pool
-                    future = executor.submit(
-                        publishFolder,
-                        folder=dir_entry.path,
-                        login=login,
-                        password=password,
-                        parentPageID=currentPageID,
-                        base_folder=base_folder,
-                        executor=executor
-                    )
-                    dir_futures[future] = dir_entry.path
-                else:
-                    _stats.add_error({
-                        'path': str(dir_entry.path),
-                        'type': 'directory',
-                        'error': result.get('error', 'Unknown error'),
-                        'status_code': result.get('status_code', 'N/A')
-                    })
-                    logging.warning(f"Skipping directory {dir_entry.path} and its children due to error")
-
-            # Wait for all subdirectory processing to complete
-            for future in as_completed(dir_futures):
-                path = dir_futures[future]
-                try:
-                    future.result()  # Blocks until complete
-                    logging.debug(f"Completed directory: {path}")
-                except Exception as e:
-                    logging.error(f"Error processing directory {path}: {e}")
-
-        # PHASE 2: Process all files in parallel
+        # PHASE 2: Process all files in PARALLEL (main speedup)
         if files:
             logging.info(f"Processing {len(files)} files in parallel...")
             file_futures = {}
@@ -273,7 +262,7 @@ def publishFolder(folder, login, password, parentPageID=None, base_folder=None, 
                 )
                 file_futures[future] = file_entry.path
 
-            # Wait for all file processing to complete
+            # Wait for all file processing in this folder to complete
             for future in as_completed(file_futures):
                 path = file_futures[future]
                 try:
